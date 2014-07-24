@@ -1,12 +1,92 @@
+#include <fstream>
 #include <opencv2/opencv.hpp>
+#include <boost/filesystem.hpp>
+#include <boost/program_options.hpp>
+#include <boost/timer.hpp>
 #include <Eigen/Sparse>
 
-// Optimization params
-float lambda = 0.01;
-float beta0 = 2*lambda;
-float beta_max = 100000;
-float kappa = 2.0;
-bool exact = false;
+namespace po = boost::program_options;
+namespace fs = boost::filesystem;
+
+std::string input_file, out_dir, config_file;
+
+// optimization params
+float lambda;
+float beta0;
+float beta_max;
+float kappa;
+bool exact;
+int iter_max = 1000;
+
+// buffers for solving linear system
+Eigen::SparseMatrix<float> A0, E;
+Eigen::SparseMatrix<float> GX, GY;
+Eigen::VectorXf S_vec, I_vec, H_vec, V_vec;
+
+void parseCommandLine(int argc, char** argv){
+    po::options_description desc("Allowd options");
+    po::variables_map vm;
+    desc.add_options()
+        ("help,h","produce help message")
+        ("input,i", po::value<std::string>(&input_file),"input filename")
+        ("output,o", po::value<std::string>(&out_dir),"output path")
+        ("config,c", po::value<std::string>(&config_file),"config filename");
+
+    po::store(po::parse_command_line(argc, argv, desc), vm);
+    po::notify(vm);
+
+    if(vm.count("help")){
+        std::cout << desc << std::endl;
+        exit(-1);
+    }
+
+    if(config_file.empty() || input_file.empty() || out_dir.empty()){
+        std::cerr << "command line parse error!!" << std::endl;
+        std::cout << desc << std::endl;        
+        exit(-1);
+    }    
+
+    std::cout << "input path : " << input_file << std::endl;
+    std::cout << "output path : " << out_dir << std::endl;  
+    std::cout << "config file : " << config_file << std::endl;
+}
+
+void parseConfigFile(const std::string &config_filename){
+
+    po::options_description desc_config("config file option");
+    po::variables_map vm;
+    desc_config.add_options()
+        ("lambda", po::value<float>(&lambda), "smoothing parameter")
+        ("beta_max", po::value<float>(&beta_max), "rotation direction (shimazu is normal direction(this value is 1))")
+        ("kappa", po::value<float>(&kappa), "filtered or not")
+        ("exact", po::value<bool>(&exact), "exact computation of linear system")
+    ;
+
+    std::ifstream ifs(config_filename);
+    store(parse_config_file(ifs, desc_config), vm);
+    notify(vm);
+
+    beta0 = 2*lambda;
+
+    std::cout << "*** Configuration ***" << std::endl;
+    std::cout << "lambda : " << lambda << std::endl;
+    std::cout << "beta_max : " << beta_max << std::endl;
+    std::cout << "kappa : " << kappa << std::endl;
+    std::cout << "exact : " << exact << std::endl;
+    std::cout << "*********************" << std::endl;    
+
+}
+
+void saveConfigFile(const std::string filename)
+{
+    std::ofstream ofs;
+    ofs.open(filename.c_str());
+    ofs << "lambda = " << lambda << std::endl;
+    ofs << "beta_max = " << beta_max << std::endl;
+    ofs << "kappa = " << kappa << std::endl;
+    ofs << "exact = " << (exact ? "true" : "false") << std::endl;
+    ofs.close();
+}
 
 void buildGradientMatrix(Eigen::SparseMatrix<float> &G, 
                          const int rows,
@@ -61,7 +141,7 @@ void constructSparseIdentityMatrix(Eigen::SparseMatrix<float> &mat, const int &n
     mat.setFromTriplets(coeffcients.begin(), coeffcients.end());
 }
 void vec2CvMat(const Eigen::VectorXf &vec, cv::Mat &mat, const int &rows, const int &cols){
-    mat = cv::Mat(cols, rows, CV_32FC1);
+    //mat = cv::Mat(rows, cols, CV_32FC1);
     for(int i=0; i<rows; i++){
         float *ptr = reinterpret_cast<float*>(mat.data+mat.step*i);
         for(int j=0; j<cols; j++){
@@ -73,7 +153,6 @@ void vec2CvMat(const Eigen::VectorXf &vec, cv::Mat &mat, const int &rows, const 
 void cvMat2Vec(const cv::Mat &mat, Eigen::VectorXf &vec){
     int rows = mat.rows;
     int cols = mat.cols;
-    vec = Eigen::VectorXf::Zero(rows*cols);
 
     for(int i=0; i<rows; i++){
         float *ptr = reinterpret_cast<float*>(mat.data+mat.step*i);
@@ -86,46 +165,61 @@ void cvMat2Vec(const cv::Mat &mat, Eigen::VectorXf &vec){
 
 void computeGradient(const cv::Mat &mat, cv::Mat &grad_x, cv::Mat &grad_y){
     int rows = mat.rows;
-    int cols = mat.cols;
-    grad_x = cv::Mat::zeros(rows, cols, CV_32FC1);
-    grad_y = cv::Mat::zeros(rows, cols, CV_32FC1);    
+    int cols = mat.cols;  
 
-    for(int i=0; i<rows-1; i++){        
+    for(int i=0; i<rows-1; i++){ 
+        float *ptr = reinterpret_cast<float*>(mat.data+mat.step*i);
+        float *n_ptr = reinterpret_cast<float*>(mat.data+mat.step*(i+1));
+        float *gx_ptr = reinterpret_cast<float*>(grad_x.data+grad_x.step*i);
+        float *gy_ptr = reinterpret_cast<float*>(grad_y.data+grad_y.step*i);
         for(int j=0; j<cols-1; j++){        
-            grad_x.at<float>(i, j) = mat.at<float>(i, j) - mat.at<float>(i, j+1);
-            grad_y.at<float>(i, j) = mat.at<float>(i, j) - mat.at<float>(i+1, j);
+            *gx_ptr = *ptr - *(ptr+1);
+            *gy_ptr = *ptr - *n_ptr;
+            ++ptr;
+            ++n_ptr;
+            ++gx_ptr;
+            ++gy_ptr;
         }
     }
 }
 
-void computeS(cv::Mat &S, 
-              const cv::Mat &I,
-              const cv::Mat &H,
-              const cv::Mat &V,
-              const float &beta
-              )
+/*
+void computeSwithFFT(cv::Mat &S, 
+                     const cv::Mat &I,
+                     const cv::Mat &H,
+                     const cv::Mat &V,
+                     const float &beta)
 {
     int rows = S.rows;
     int cols = S.cols;
     int num_of_variables = rows*cols;
 
-    Eigen::VectorXf S_vec, I_vec, H_vec, V_vec;
+    cv::Mat fx = (cv::Mat_<float>(1, 2) << 1.0f, -1.0f);
+    cv::Mat fy = (cv::Mat_<float>(2, 1) << 1.0f, -1.0f);    
+}
+*/
+
+void computeS(cv::Mat &S, 
+              const cv::Mat &I,
+              const cv::Mat &H,
+              const cv::Mat &V,
+              const float &beta)
+{
+    int rows = S.rows;
+    int cols = S.cols;
+    int num_of_variables = rows*cols;
+
+    boost::timer t;
+
     cvMat2Vec(I, I_vec);
     cvMat2Vec(H, H_vec);
     cvMat2Vec(V, V_vec);
 
-    Eigen::SparseMatrix<float> GX, GY;
-    std::vector<std::pair<int, float> > indices;
-    indices.push_back(std::pair<int, float>(0, 1.0f));
-    indices.push_back(std::pair<int, float>(1, -1.0f));
-    buildGradientMatrix(GX, rows, cols, indices, std::vector<std::pair<int, float> >());
-    buildGradientMatrix(GY, rows, cols, std::vector<std::pair<int, float> >(), indices);
+    std::cout << "\t\t mat2vec " << t.elapsed() << " sec" << std::endl;    
+    t.restart();
 
     // build linear system Ax=b
-    Eigen::SparseMatrix<float> E;
-    constructSparseIdentityMatrix(E, num_of_variables);
-    Eigen::SparseMatrix<float> A = beta*(GX.transpose()*GX+GY.transpose()*GY)+E;
-
+    Eigen::SparseMatrix<float> A = beta*A0 + E;
     Eigen::VectorXf b = I_vec + beta*(GX.transpose()*H_vec+GY.transpose()*V_vec);
 
     // solve linear system
@@ -141,25 +235,35 @@ void computeS(cv::Mat &S,
         Eigen::ConjugateGradient<Eigen::SparseMatrix<float> > solver;
         S_vec = solver.compute(A).solve(b);        
     }
+    std::cout << "\t\t solve linear system " << t.elapsed() << " sec" << std::endl;
+    t.restart();    
 
+    // update S
     vec2CvMat(S_vec, S, rows, cols);
+    std::cout << "\t\t vec2mat " << t.elapsed() << " sec" << std::endl;        
 }
 
-void optimize(cv::Mat &S, cv::Mat &I, cv::Mat &H, cv::Mat &V, float &beta){
-
+void optimize(cv::Mat &S, 
+              const cv::Mat &I, 
+              cv::Mat &H, 
+              cv::Mat &V, 
+              cv::Mat &grad_x,
+              cv::Mat &grad_y,
+              float &beta)
+{
     int rows = S.rows;
     int cols = S.cols;
 
-    /// Generate grad_x and grad_y
-    cv::Mat grad_x, grad_y;
+    boost::timer t;
 
     // Compute Gradient
     computeGradient(S, grad_x, grad_y);
+    std::cout << "\t compute gradient " << t.elapsed() << " sec" << std::endl;
+    t.restart();
 
     // Computing h, v
     for(int j=0; j<rows; j++){
         for(int i=0; i<cols; i++){
-
             float gx = grad_x.at<float>(j, i);
             float gy = grad_y.at<float>(j, i);
             float val = gx*gx + gy*gy;        
@@ -173,35 +277,67 @@ void optimize(cv::Mat &S, cv::Mat &I, cv::Mat &H, cv::Mat &V, float &beta){
             }      
         }            
     }
+    std::cout << "\t compute h, v " << t.elapsed() << " sec" << std::endl;    
+    t.restart();    
+
     // Computing s 
     computeS(S, I, H, V, beta);
+    std::cout << "\t compute S " << t.elapsed() << " sec" << std::endl;    
 }
 
-cv::Mat minimizeL0Gradient(const cv::Mat &src){
-    std::vector<cv::Mat> src_channels;
-    cv::split(src, src_channels);    
+void init(const int &rows, const int &cols)
+{
+    int num_of_variables = rows*cols;
 
-    int num_of_channels = src_channels.size();
+    // build gradient matrix
+    std::vector<std::pair<int, float> > indices;
+    indices.push_back(std::pair<int, float>(0, 1.0f));
+    indices.push_back(std::pair<int, float>(1, -1.0f));
+    buildGradientMatrix(GX, rows, cols, indices, std::vector<std::pair<int, float> >());
+    buildGradientMatrix(GY, rows, cols, std::vector<std::pair<int, float> >(), indices);
+
+    A0 = (GX.transpose()*GX+GY.transpose()*GY);
+
+    constructSparseIdentityMatrix(E, num_of_variables);    
+
+    S_vec = Eigen::VectorXf::Zero(rows*cols);    
+    I_vec = Eigen::VectorXf::Zero(rows*cols);        
+    H_vec = Eigen::VectorXf::Zero(rows*cols);    
+    V_vec = Eigen::VectorXf::Zero(rows*cols);        
+}
+
+std::vector<cv::Mat> minimizeL0Gradient(const cv::Mat &src){
+    int rows = src.rows;
+    int cols = src.cols;
+    std::vector<cv::Mat> src_channels;
+    cv::split(src, src_channels);
+
+    int num_of_channels = src_channels.size();    
     std::vector<cv::Mat> S_channels(num_of_channels), I_channels(num_of_channels), S_U8_channels(num_of_channels);
     for(int i=0; i<num_of_channels; i++){
         src_channels[i].convertTo(I_channels[i], CV_32FC1);
         I_channels[i] *= 1./255;
-        I_channels[0].copyTo(S_channels[i]);            
+        I_channels[i].copyTo(S_channels[i]);            
     }
 
     // initialize
-    cv::Mat H, V, S;
+    cv::Mat S, H, V, grad_x, grad_y;
+    std::vector<cv::Mat> S_mats;
     float beta = beta0;
     int count = 0;    
-    H = cv::Mat(src.rows, src.cols, CV_32FC1);
-    V = cv::Mat(src.rows, src.cols, CV_32FC1);
+    S = cv::Mat(rows, cols, CV_32FC1);
+    H = cv::Mat(rows, cols, CV_32FC1);
+    V = cv::Mat(rows, cols, CV_32FC1);
+    grad_x = cv::Mat::zeros(rows, cols, CV_32FC1);
+    grad_y = cv::Mat::zeros(rows, cols, CV_32FC1);      
+    init(rows, cols);
 
     // main loop
     while(beta < beta_max){
-
+        boost::timer t;
         // minimize L0 gradient
         for(int i=0; i<num_of_channels; i++){
-            optimize(S_channels[i], I_channels[i], H, V, beta);
+            optimize(S_channels[i], I_channels[i], H, V, grad_x, grad_y, beta);
         }
         // Update param
         beta = beta*kappa;
@@ -210,44 +346,45 @@ cv::Mat minimizeL0Gradient(const cv::Mat &src){
         for(int i=0; i<num_of_channels; i++){
             cv::convertScaleAbs(S_channels[i], S_U8_channels[i], 255.0);
         }        
-        cv::merge(S_U8_channels, S);
-        cv::imshow("S", S);
-        cv::waitKey(0);        
-    }
-    return S;
-}
+        cv::merge(S_U8_channels, S);        
+        S_mats.push_back(S.clone());
+        if(count >= iter_max){
+            break;
+        }
 
-std::string usage = "./L0minimization src_img exact(0 or 1, default is 0)";
+        std::cout << "iteration: " << t.elapsed() << " sec" << std::endl;
+    }
+    return S_mats;
+}
 
 int main(int argc, char** argv){
 
-    if(argc != 2 && argc != 3){
-        std::cout <<"usage: " << usage << std::endl;
-        return -1;
-    }
-    if(argc == 3){
-        exact = atoi(argv[2]) == 1? true : false;
-    }
+    // parse user input
+    parseCommandLine(argc, argv);
+    parseConfigFile(config_file);
 
-    cv::Mat img = cv::imread(argv[1], 1);
+    // read input image
+    cv::Mat img = cv::imread(input_file, 1);
     if(img.empty()){
         std::cout << "can't read input image " << std::endl;
         return -1;
     }
 
-    cv::imshow("input", img);
-    cv::Mat result = minimizeL0Gradient(img);
-    cv::imshow("result", result);
-    cv::waitKey(0);
+    // L0 gradient minimization
+    std::cout << "minimizing L0 gradient..." << std::endl;
+    std::vector<cv::Mat> results = minimizeL0Gradient(img);
+
+    // save results
+    for(int i=0; i<(int)results.size(); i++){
+        std::stringstream ss;
+        ss << out_dir << "/result_iteration_" << i+1 << ".png";
+        cv::imwrite(ss.str(), results[i]);        
+    }
+
+    // save config
     std::stringstream ss;
-    ss << "result";
-    if(exact){
-        ss << "_exact.png";
-    }
-    else{
-        ss << "_approx.png";
-    }
-    cv::imwrite(ss.str(), result);
+    ss << out_dir << "/config.txt";
+    saveConfigFile(ss.str());
 
     return 0;
 }
