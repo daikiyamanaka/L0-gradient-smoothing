@@ -183,7 +183,27 @@ void computeGradient(const cv::Mat &mat, cv::Mat &grad_x, cv::Mat &grad_y){
     }
 }
 
-/*
+void createIdftImage(const cv::Mat &complex_img, const cv::Mat &origin, cv::Mat &out)
+{
+    cv::Mat splitted[2];
+    cv::split(complex_img, splitted);
+
+    splitted[0](cv::Rect(0, 0, origin.cols, origin.rows)).copyTo(out);
+    cv::normalize(out, out, 0, 1, CV_MINMAX);
+}
+
+void createDftImage(const cv::Mat &img, cv::Mat &complex_img, bool conj = false)
+{    
+    cv::Mat planes[] = {cv::Mat_<float>(img), cv::Mat::zeros(img.size(), CV_32F)};
+    cv::merge(planes, 2, complex_img);
+    cv::dft(complex_img, complex_img);    
+    if(conj){
+        cv::split(complex_img, planes);
+        planes[1] = -1*planes[1];
+        cv::merge(planes, 2, complex_img);
+    }
+}
+
 void computeSwithFFT(cv::Mat &S, 
                      const cv::Mat &I,
                      const cv::Mat &H,
@@ -194,10 +214,39 @@ void computeSwithFFT(cv::Mat &S,
     int cols = S.cols;
     int num_of_variables = rows*cols;
 
-    cv::Mat fx = (cv::Mat_<float>(1, 2) << 1.0f, -1.0f);
-    cv::Mat fy = (cv::Mat_<float>(2, 1) << 1.0f, -1.0f);    
+    cv::Mat fx_dft, fy_dft, I_dft, H_dft, V_dft;
+    cv::Mat fx_dft_conj, fy_dft_conj;
+
+    cv::Mat fx = cv::Mat::zeros(rows, cols, CV_32FC1);
+    fx.at<float>(0, 0) = 1;
+    fx.at<float>(0, 1) = -1;
+    cv::Mat fy = cv::Mat::zeros(rows, cols, CV_32FC1);
+    fy.at<float>(0, 0) = 1;
+    fy.at<float>(1, 0) = -1;
+
+    createDftImage(fx, fx_dft);
+    createDftImage(fy, fy_dft);
+    createDftImage(fx, fx_dft_conj, true);
+    createDftImage(fy, fy_dft_conj, true);
+    createDftImage(I, I_dft);
+    createDftImage(H, H_dft);
+    createDftImage(V, V_dft);
+
+    cv::Mat numerator = I_dft + beta*(fx_dft_conj.mul(H_dft) + fy_dft_conj.mul(V_dft));
+    cv::Mat denominator = 1+beta*(fx_dft_conj.mul(fx_dft) + fy_dft_conj.mul(fy_dft));
+
+    cv::Mat complex_img = I_dft;
+    cv::idft(complex_img, complex_img);
+
+    cv::Mat result, result_U8;
+    createIdftImage(complex_img, I, result);
+    cv::convertScaleAbs(result, result_U8, 255.0);    
+    cv::imshow("result", result_U8);
+    S = result;
+
+    cv::waitKey(0);
+
 }
-*/
 
 void computeS(cv::Mat &S, 
               const cv::Mat &I,
@@ -281,7 +330,9 @@ void optimize(cv::Mat &S,
     t.restart();    
 
     // Computing s 
-    computeS(S, I, H, V, beta);
+    //computeS(S, I, H, V, beta);
+    computeSwithFFT(S, I, H, V, beta);
+
     std::cout << "\t compute S " << t.elapsed() << " sec" << std::endl;    
 }
 
@@ -351,7 +402,7 @@ std::vector<cv::Mat> minimizeL0Gradient(const cv::Mat &src){
         if(count >= iter_max){
             break;
         }
-
+        cv::imshow("S", S);
         std::cout << "iteration: " << t.elapsed() << " sec" << std::endl;
     }
     return S_mats;
