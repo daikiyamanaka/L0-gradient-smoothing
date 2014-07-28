@@ -132,6 +132,7 @@ void buildGradientMatrix(Eigen::SparseMatrix<float> &G,
     }
     G.setFromTriplets(coeffcients.begin(), coeffcients.end());
 }
+
 void constructSparseIdentityMatrix(Eigen::SparseMatrix<float> &mat, const int &num_of_variables){
     mat = Eigen::SparseMatrix<float>(num_of_variables, num_of_variables);
     std::vector<Eigen::Triplet<float> > coeffcients;
@@ -140,8 +141,29 @@ void constructSparseIdentityMatrix(Eigen::SparseMatrix<float> &mat, const int &n
     }
     mat.setFromTriplets(coeffcients.begin(), coeffcients.end());
 }
+
+void init(const int &rows, const int &cols)
+{
+    int num_of_variables = rows*cols;
+
+    // build gradient matrix
+    std::vector<std::pair<int, float> > indices;
+    indices.push_back(std::pair<int, float>(0, 1.0f));
+    indices.push_back(std::pair<int, float>(1, -1.0f));
+    buildGradientMatrix(GX, rows, cols, indices, std::vector<std::pair<int, float> >());
+    buildGradientMatrix(GY, rows, cols, std::vector<std::pair<int, float> >(), indices);
+
+    A0 = (GX.transpose()*GX+GY.transpose()*GY);
+
+    constructSparseIdentityMatrix(E, num_of_variables);    
+
+    S_vec = Eigen::VectorXf::Zero(rows*cols);    
+    I_vec = Eigen::VectorXf::Zero(rows*cols);        
+    H_vec = Eigen::VectorXf::Zero(rows*cols);    
+    V_vec = Eigen::VectorXf::Zero(rows*cols);        
+}
+
 void vec2CvMat(const Eigen::VectorXf &vec, cv::Mat &mat, const int &rows, const int &cols){
-    //mat = cv::Mat(rows, cols, CV_32FC1);
     for(int i=0; i<rows; i++){
         float *ptr = reinterpret_cast<float*>(mat.data+mat.step*i);
         for(int j=0; j<cols; j++){
@@ -183,71 +205,6 @@ void computeGradient(const cv::Mat &mat, cv::Mat &grad_x, cv::Mat &grad_y){
     }
 }
 
-void createIdftImage(const cv::Mat &complex_img, const cv::Mat &origin, cv::Mat &out)
-{
-    cv::Mat splitted[2];
-    cv::split(complex_img, splitted);
-
-    splitted[0](cv::Rect(0, 0, origin.cols, origin.rows)).copyTo(out);
-    cv::normalize(out, out, 0, 1, CV_MINMAX);
-}
-
-void createDftImage(const cv::Mat &img, cv::Mat &complex_img, bool conj = false)
-{    
-    cv::Mat planes[] = {cv::Mat_<float>(img), cv::Mat::zeros(img.size(), CV_32F)};
-    cv::merge(planes, 2, complex_img);
-    cv::dft(complex_img, complex_img);    
-    if(conj){
-        cv::split(complex_img, planes);
-        planes[1] = -1*planes[1];
-        cv::merge(planes, 2, complex_img);
-    }
-}
-
-void computeSwithFFT(cv::Mat &S, 
-                     const cv::Mat &I,
-                     const cv::Mat &H,
-                     const cv::Mat &V,
-                     const float &beta)
-{
-    int rows = S.rows;
-    int cols = S.cols;
-    int num_of_variables = rows*cols;
-
-    cv::Mat fx_dft, fy_dft, I_dft, H_dft, V_dft;
-    cv::Mat fx_dft_conj, fy_dft_conj;
-
-    cv::Mat fx = cv::Mat::zeros(rows, cols, CV_32FC1);
-    fx.at<float>(0, 0) = 1;
-    fx.at<float>(0, 1) = -1;
-    cv::Mat fy = cv::Mat::zeros(rows, cols, CV_32FC1);
-    fy.at<float>(0, 0) = 1;
-    fy.at<float>(1, 0) = -1;
-
-    createDftImage(fx, fx_dft);
-    createDftImage(fy, fy_dft);
-    createDftImage(fx, fx_dft_conj, true);
-    createDftImage(fy, fy_dft_conj, true);
-    createDftImage(I, I_dft);
-    createDftImage(H, H_dft);
-    createDftImage(V, V_dft);
-
-    cv::Mat numerator = I_dft + beta*(fx_dft_conj.mul(H_dft) + fy_dft_conj.mul(V_dft));
-    cv::Mat denominator = 1+beta*(fx_dft_conj.mul(fx_dft) + fy_dft_conj.mul(fy_dft));
-
-    cv::Mat complex_img = I_dft;
-    cv::idft(complex_img, complex_img);
-
-    cv::Mat result, result_U8;
-    createIdftImage(complex_img, I, result);
-    cv::convertScaleAbs(result, result_U8, 255.0);    
-    cv::imshow("result", result_U8);
-    S = result;
-
-    cv::waitKey(0);
-
-}
-
 void computeS(cv::Mat &S, 
               const cv::Mat &I,
               const cv::Mat &H,
@@ -256,7 +213,6 @@ void computeS(cv::Mat &S,
 {
     int rows = S.rows;
     int cols = S.cols;
-    int num_of_variables = rows*cols;
 
     boost::timer t;
 
@@ -267,7 +223,7 @@ void computeS(cv::Mat &S,
     std::cout << "\t\t mat2vec " << t.elapsed() << " sec" << std::endl;    
     t.restart();
 
-    // build linear system Ax=b
+    // build linear system As=b
     Eigen::SparseMatrix<float> A = beta*A0 + E;
     Eigen::VectorXf b = I_vec + beta*(GX.transpose()*H_vec+GY.transpose()*V_vec);
 
@@ -329,32 +285,10 @@ void optimize(cv::Mat &S,
     std::cout << "\t compute h, v " << t.elapsed() << " sec" << std::endl;    
     t.restart();    
 
-    // Computing s 
-    //computeS(S, I, H, V, beta);
-    computeSwithFFT(S, I, H, V, beta);
+    // Computing S
+    computeS(S, I, H, V, beta);
 
     std::cout << "\t compute S " << t.elapsed() << " sec" << std::endl;    
-}
-
-void init(const int &rows, const int &cols)
-{
-    int num_of_variables = rows*cols;
-
-    // build gradient matrix
-    std::vector<std::pair<int, float> > indices;
-    indices.push_back(std::pair<int, float>(0, 1.0f));
-    indices.push_back(std::pair<int, float>(1, -1.0f));
-    buildGradientMatrix(GX, rows, cols, indices, std::vector<std::pair<int, float> >());
-    buildGradientMatrix(GY, rows, cols, std::vector<std::pair<int, float> >(), indices);
-
-    A0 = (GX.transpose()*GX+GY.transpose()*GY);
-
-    constructSparseIdentityMatrix(E, num_of_variables);    
-
-    S_vec = Eigen::VectorXf::Zero(rows*cols);    
-    I_vec = Eigen::VectorXf::Zero(rows*cols);        
-    H_vec = Eigen::VectorXf::Zero(rows*cols);    
-    V_vec = Eigen::VectorXf::Zero(rows*cols);        
 }
 
 std::vector<cv::Mat> minimizeL0Gradient(const cv::Mat &src){
@@ -402,7 +336,6 @@ std::vector<cv::Mat> minimizeL0Gradient(const cv::Mat &src){
         if(count >= iter_max){
             break;
         }
-        cv::imshow("S", S);
         std::cout << "iteration: " << t.elapsed() << " sec" << std::endl;
     }
     return S_mats;
