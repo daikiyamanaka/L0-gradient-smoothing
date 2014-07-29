@@ -220,8 +220,8 @@ void computeS(cv::Mat &S,
     cvMat2Vec(H, H_vec);
     cvMat2Vec(V, V_vec);
 
-    std::cout << "\t\t mat2vec " << t.elapsed() << " sec" << std::endl;    
-    t.restart();
+    //std::cout << "\t\t mat2vec " << t.elapsed() << " sec" << std::endl;    
+    //t.restart();
 
     // build linear system As=b
     Eigen::SparseMatrix<float> A = beta*A0 + E;
@@ -240,12 +240,12 @@ void computeS(cv::Mat &S,
         Eigen::ConjugateGradient<Eigen::SparseMatrix<float> > solver;
         S_vec = solver.compute(A).solve(b);        
     }
-    std::cout << "\t\t solve linear system " << t.elapsed() << " sec" << std::endl;
-    t.restart();    
+    //std::cout << "\t\t solve linear system " << t.elapsed() << " sec" << std::endl;
+    //t.restart();    
 
     // update S
     vec2CvMat(S_vec, S, rows, cols);
-    std::cout << "\t\t vec2mat " << t.elapsed() << " sec" << std::endl;        
+    //std::cout << "\t\t vec2mat " << t.elapsed() << " sec" << std::endl;        
 }
 
 void optimize(cv::Mat &S, 
@@ -263,8 +263,8 @@ void optimize(cv::Mat &S,
 
     // Compute Gradient
     computeGradient(S, grad_x, grad_y);
-    std::cout << "\t compute gradient " << t.elapsed() << " sec" << std::endl;
-    t.restart();
+    // std::cout << "\t compute gradient " << t.elapsed() << " sec" << std::endl;
+    // t.restart();
 
     // Computing h, v
     for(int j=0; j<rows; j++){
@@ -282,13 +282,13 @@ void optimize(cv::Mat &S,
             }      
         }            
     }
-    std::cout << "\t compute h, v " << t.elapsed() << " sec" << std::endl;    
-    t.restart();    
+    // std::cout << "\t compute h, v " << t.elapsed() << " sec" << std::endl;    
+    // t.restart();    
 
     // Computing S
     computeS(S, I, H, V, beta);
 
-    std::cout << "\t compute S " << t.elapsed() << " sec" << std::endl;    
+    //std::cout << "\t compute S " << t.elapsed() << " sec" << std::endl;    
 }
 
 std::vector<cv::Mat> minimizeL0Gradient(const cv::Mat &src){
