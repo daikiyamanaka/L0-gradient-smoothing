@@ -336,7 +336,7 @@ std::vector<cv::Mat> minimizeL0Gradient(const cv::Mat &src){
         if(count >= iter_max){
             break;
         }
-        std::cout << "iteration: " << t.elapsed() << " sec" << std::endl;
+        //std::cout << "iteration: " << t.elapsed() << " sec" << std::endl;
     }
     return S_mats;
 }
