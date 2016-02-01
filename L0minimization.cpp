@@ -97,8 +97,8 @@ void buildGradientMatrix(Eigen::SparseMatrix<float> &G,
 {
     int num_of_variables = rows*cols;
     std::vector<Eigen::Triplet<float> > coeffcients;
-    bool compute_x = x_indices.empty() ? false : true;
-    bool compute_y = y_indices.empty() ? false : true;
+    bool compute_x = x_indices.empty();
+    bool compute_y = y_indices.empty();
 
     G = Eigen::SparseMatrix<float>(num_of_variables, num_of_variables);
 
