@@ -3,7 +3,7 @@ L0-gradient-smoothing
 ---------------------------------------------
 This is a C++ implementation of "Image Smoothing via L0 Gradient Minimization", Li Xu, Cewu Lu, Yi Xu, Jiaya Jia, SIGGRAPH ASIA 2011.
 
-###Dependencies:
+### Dependencies:
 The code depends on following libraries.
 
 * OpenCV 2.4.9
